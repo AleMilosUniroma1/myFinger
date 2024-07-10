@@ -26,12 +26,6 @@ int H_LOGIN_TIME = 18;
 int H_OFFICE = 14;
 int H_OFFICE_PHONE = 12;
 
-int real_name_matches_user(char *name, char *username_buffer) {
-  // Check for each USER_PROCESS if the gecos name is equal to name.
-  // YES ? -> return 1 and set username_buffer to the found username.
-  // NO ? return 0;
-}
-
 void *memcheck(const char *name, void *mem) {
   if (!mem) {
     perror(name);
@@ -53,6 +47,42 @@ typedef struct {
   size_t length;
 
 } StringSet;
+
+int real_name_matches_user(char *name, char username_buffer[80]) {
+  // Check for each USER_PROCESS if the gecos name is equal to name.
+  // YES ? -> return 1 and set username_buffer to the found username.
+  // NO ? return 0;
+
+  struct utmp record;
+
+  int fd = open(_PATH_UTMP, O_RDONLY);
+  int record_size = sizeof(record);
+
+  if (fd < 0) {
+    perror("Cannot open utmp file.");
+    exit(1);
+  }
+
+  char *gecos_name;
+  while (read(fd, &record, record_size) == record_size) {
+    if (record.ut_type == USER_PROCESS) {
+      char *gecos_name;
+      struct passwd *pwd = getpwnam(record.ut_user);
+
+      gecos_name = xstrdup(strtok(pwd->pw_gecos, ","));
+
+      if (strcmp(gecos_name, name) == 0) {
+        // set the usernamebuffer to username
+        strcpy(username_buffer, record.ut_user);
+        free(gecos_name);
+        return 1;
+      }
+      free(gecos_name);
+    }
+  }
+
+  return 0;
+}
 
 int set_add(StringSet *set, char *entry) {
   for (size_t i = 0; i < set->length; i++) {
@@ -268,12 +298,12 @@ void get_idle(char tty[32], time_t *idle, bool *writable) {
 
   if (ret < 0) {
     *idle = 0;
-    *writable = 0;
+    *writable = -1; // the information is not found
     return;
   }
 
-#define TALKABLE 0220
-  *writable = ((f_info.st_mode & TALKABLE) == TALKABLE);
+  const int write_permission = 0220;
+  *writable = ((f_info.st_mode & write_permission) == write_permission);
 
   time_t now = time(NULL);
   *idle = now < f_info.st_atime
@@ -391,9 +421,18 @@ void extract_gecos(char *gecos, int called) {
 void get_hour_minutes(char *buffer, time_t time_s) {
   struct tm *timeinfo;
   timeinfo = localtime(&time_s);
-
-  char *format = "%I:%M";
-  strftime(buffer, 80, format, timeinfo);
+  if (timeinfo->tm_hour > 0) {
+    char *format = "%I:%M";
+    strftime(buffer, 80, format, timeinfo);
+  } else {
+    if (timeinfo->tm_min > 1) {
+      char *format = "%M";
+      strftime(buffer, 80, format, timeinfo);
+    } else {
+      char *format = "";
+      strftime(buffer, 80, format, timeinfo);
+    }
+  }
 }
 
 void get_format_time(char *buffer, int time_s) {
@@ -571,11 +610,13 @@ int main(int argc, char **argv) {
 
       struct utmp utmp_record;
 
+      bool found_user = 0;
       int fd = open(_PATH_UTMP, O_RDONLY);
       int record_size = sizeof(utmp_record);
       while (read(fd, &utmp_record, record_size) == record_size) {
         if (utmp_record.ut_type == USER_PROCESS) {
           if (strcmp(utmp_record.ut_user, argv[optind]) == 0) {
+            found_user = 1;
             if (sflag == 1) {
               get_user_info(argv[optind], utmp_record);
               printf("\n");
@@ -584,18 +625,32 @@ int main(int argc, char **argv) {
               printf("\n");
             }
           } else {
-            // Check for user by Name
+            // Check for user by Name only if mflag is not set
+            if (mflag == 0) {
+              char username_buff[80];
+              int found_name =
+                  real_name_matches_user(argv[optind], username_buff);
+
+              if (found_name) {
+                found_user = 1;
+                if (set_add(&usernames, username_buff)) {
+                  get_user_info(username_buff, utmp_record);
+                  printf("\n");
+                }
+              }
+            }
           }
         }
       }
-      // Se ci sono usernames qui dentro, eseguire myFinger esclusivamente su
-      // questi. Altrimenti possiamo procedere su tutti i logged in users in
-      // utmp.
+
+      if (!found_user) {
+        fprintf(stderr, "%s: %s: no such user\n", PROGRAM_NAME, argv[optind]);
+      }
     }
 
     optind++;
-    set_free(&usernames);
   }
+  set_free(&usernames);
 
   if (allusersflag == 1) {
     if (lflag == 0) {
