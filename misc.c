@@ -6,11 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 #include <utmp.h>
 
-char PROGRAM_NAME[9] = "myFinger";
+#include "misc.h"
 
 int lflag, mflag, pflag, sflag;
 
@@ -18,13 +17,10 @@ int sheader;
 int allusersflag = 1;
 
 int headerflag;
-int H_LOGIN = 13;
-int H_NAME = 12;
-int H_TTY = 11;
-int H_IDLE = 10;
-int H_LOGIN_TIME = 18;
-int H_OFFICE = 14;
-int H_OFFICE_PHONE = 12;
+
+//////////////////////////////////////////////
+/////// MEM HELPERS
+//////////////////////////////////////////////
 
 void *memcheck(const char *name, void *mem) {
   if (!mem) {
@@ -42,28 +38,30 @@ void *xrealloc(void *old, size_t size) {
 
 void *xstrdup(const char *s) { return memcheck("strdup", strdup(s)); }
 
-typedef struct {
-  char **entries;
-  size_t length;
+//////////////////////////////////////////////
+/////// MISC
+//////////////////////////////////////////////
 
-} StringSet;
+void print_header() {
+  if (lflag == 0 && headerflag == 0) {
+    headerflag = 1;
+    printf("Login%8sName%8sTty%8sIdle%6sLogin Time%8sOffice%8sOffice Phone\n",
+           "", "", "", "", "", "");
+  }
+}
 
 int real_name_matches_user(char *name, char username_buffer[80]) {
-  // Check for each USER_PROCESS if the gecos name is equal to name.
-  // YES ? -> return 1 and set username_buffer to the found username.
-  // NO ? return 0;
-
   struct utmp record;
 
   int fd = open(_PATH_UTMP, O_RDONLY);
   int record_size = sizeof(record);
 
   if (fd < 0) {
-    perror("Cannot open utmp file.");
-    exit(1);
+    perror("open");
+    exit(EXIT_FAILURE);
   }
 
-  char *gecos_name;
+  char *gecos_name = NULL;
   while (read(fd, &record, record_size) == record_size) {
     if (record.ut_type == USER_PROCESS) {
       char *gecos_name;
@@ -77,12 +75,16 @@ int real_name_matches_user(char *name, char username_buffer[80]) {
         free(gecos_name);
         return 1;
       }
-      free(gecos_name);
     }
   }
+  free(gecos_name);
 
   return 0;
 }
+
+//////////////////////////////////////////////
+/////// StringSet methods
+//////////////////////////////////////////////
 
 int set_add(StringSet *set, char *entry) {
   for (size_t i = 0; i < set->length; i++) {
@@ -117,12 +119,10 @@ void set_free(StringSet *set) {
   set->length = 0;
 }
 
-/**
- * 11 digits are formatted as "+N-NNN-NNN-NNNN"
- * 5 digits are formatted as "xN-NNNN"
- * 4 digits are formatted as "xNNNN"
- * otherwise they are formatted as they appear.
- */
+//////////////////////////////////////////////
+/////// Formatters
+//////////////////////////////////////////////
+
 char *format_phone_number(char *phone_number) {
   char *buf;
   int phone_idx = 0;
@@ -130,7 +130,7 @@ char *format_phone_number(char *phone_number) {
 
     buf = xmalloc(5 + strlen(phone_number));
     buf[0] = '+';
-    for (int i = 1; i < 4 + strlen(phone_number); i++) {
+    for (size_t i = 1; i < 4 + strlen(phone_number); i++) {
       if (i == 2 || i == 6 || i == 10) {
         buf[i] = '-';
       } else {
@@ -142,7 +142,7 @@ char *format_phone_number(char *phone_number) {
   } else if (strlen(phone_number) == 10) {
 
     buf = xmalloc(3 + strlen(phone_number));
-    for (int i = 0; i < 2 + strlen(phone_number); i++) {
+    for (size_t i = 0; i < 2 + strlen(phone_number); i++) {
       if (i == 3 || i == 7) {
         buf[i] = '-';
       } else {
@@ -154,7 +154,7 @@ char *format_phone_number(char *phone_number) {
   } else if (strlen(phone_number) == 5) {
     buf = xmalloc(3 + strlen(phone_number));
     buf[0] = 'x';
-    for (int i = 1; i < 2 + strlen(phone_number); i++) {
+    for (size_t i = 1; i < 2 + strlen(phone_number); i++) {
       if (i == 2) {
         buf[i] = '-';
       } else {
@@ -166,14 +166,14 @@ char *format_phone_number(char *phone_number) {
   } else if (strlen(phone_number) == 4) {
     buf = xmalloc(2 + strlen(phone_number));
     buf[0] = 'x';
-    for (int i = 1; i < 2 + strlen(phone_number); i++) {
+    for (size_t i = 1; i < 2 + strlen(phone_number); i++) {
       buf[i] = phone_number[phone_idx++];
     }
 
     buf[strlen(phone_number) + 1] = '\0';
   } else {
     buf = xmalloc(1 + strlen(phone_number));
-    for (int i = 0; i < strlen(phone_number); i++) {
+    for (size_t i = 0; i < strlen(phone_number); i++) {
       buf[i] = phone_number[phone_idx++];
     }
     buf[strlen(phone_number)] = '\0';
@@ -182,8 +182,57 @@ char *format_phone_number(char *phone_number) {
   return buf;
 }
 
+void get_hour_minutes(char *buffer, time_t time_s) {
+  struct tm *timeinfo;
+  timeinfo = localtime(&time_s);
+  if (timeinfo->tm_hour > 0) {
+    char *format = "%I:%M";
+    strftime(buffer, 80, format, timeinfo);
+  } else {
+    if (timeinfo->tm_min > 1) {
+      char *format = "%M";
+      strftime(buffer, 80, format, timeinfo);
+    } else {
+      char *format = "";
+      strftime(buffer, 80, format, timeinfo);
+    }
+  }
+}
+
+void get_format_time(char *buffer, int time_s) {
+  struct tm *timeinfo;
+  time_t login_time = (time_t)time_s;
+  timeinfo = localtime(&login_time);
+
+  time_t now = time(0);
+  time_t six_months_s = 60 * 60 * 24 * 30 * 6;
+  time_t passed = now - login_time;
+
+  if (passed <= six_months_s) {
+    // Login time is displayed as month, day, hours and minutes
+    // If the time passed from last login is less than 6 months.
+    char *format;
+    if (sflag == 1) {
+      char *format = "%b  %d %H:%M";
+      strftime(buffer, 80, format, timeinfo);
+    } else {
+      char *format = "%a %b  %d %H:%M";
+      strftime(buffer, 80, format, timeinfo);
+    }
+  } else {
+    //  unless more than six months ago, in which case the year
+    //  is displayed rather than the hours and minutes.
+    char *format = "%Y";
+    strftime(buffer, 80, format, timeinfo);
+  }
+}
+
+//////////////////////////////////////////////
+/////// Homedir files data fetchers
+//////////////////////////////////////////////
+
 void get_plan(char *homedir) {
-  struct FILE *plan;
+  FILE *plan;
 
   char *filename = xmalloc(7 + strlen(homedir));
   sprintf(filename, "%s/.plan", homedir);
@@ -196,7 +245,7 @@ void get_plan(char *homedir) {
   } else {
     char ch;
 
-    while ((ch = fgetc(plan)) != EOF) {
+    while ((ch = fgetc(plan)) != -1) {
       printf("%c", ch);
     }
     printf("\n");
@@ -206,7 +255,7 @@ void get_plan(char *homedir) {
 }
 
 void get_forward(char *homedir) {
-  struct FILE *forward;
+  FILE *forward;
 
   char *filename = xmalloc(10 + strlen(homedir));
   sprintf(filename, "%s/.forward", homedir);
@@ -218,7 +267,7 @@ void get_forward(char *homedir) {
   } else {
     char ch;
 
-    while ((ch = fgetc(forward)) != EOF) {
+    while ((ch = fgetc(forward)) != -1) {
       printf("%c", ch);
     }
     printf("\n");
@@ -228,7 +277,7 @@ void get_forward(char *homedir) {
 }
 
 void get_project(char *homedir) {
-  struct FILE *project;
+  FILE *project;
 
   char *filename = xmalloc(10 + strlen(homedir));
   sprintf(filename, "%s/.project", homedir);
@@ -240,7 +289,7 @@ void get_project(char *homedir) {
   } else {
     char ch;
 
-    while ((ch = fgetc(project)) != EOF) {
+    while ((ch = fgetc(project)) != -1) {
       printf("%c", ch);
     }
   }
@@ -249,7 +298,7 @@ void get_project(char *homedir) {
 }
 
 void get_pgpkey(char *homedir) {
-  struct FILE *pgpkey;
+  FILE *pgpkey;
 
   char *filename = xmalloc(9 + strlen(homedir));
   sprintf(filename, "%s/.pgpkey", homedir);
@@ -261,7 +310,7 @@ void get_pgpkey(char *homedir) {
   } else {
     char ch;
 
-    while ((ch = fgetc(pgpkey)) != EOF) {
+    while ((ch = fgetc(pgpkey)) != -1) {
       printf("%c", ch);
     }
     printf("\n");
@@ -273,19 +322,22 @@ void get_mail(char *username) {
   char *buf = xmalloc(strlen(_PATH_MAILDIR) + strlen(username));
   snprintf(buf, 1024, "%s/%s", _PATH_MAILDIR, username);
 
-  struct FILE *mail;
+  FILE *mail;
 
   mail = fopen(buf, "r");
   if (mail == NULL) {
     printf("No mail.\n");
     return;
-  } else {
-    printf("There is a MAILLLLL!\n");
   }
+
   free(buf);
 
   fclose(mail);
 }
+
+//////////////////////////////////////////////
+/////// User info fetchers
+//////////////////////////////////////////////
 
 void get_idle(char tty[32], time_t *idle, bool *writable) {
   /* terminal device for the user */
@@ -311,14 +363,6 @@ void get_idle(char tty[32], time_t *idle, bool *writable) {
               : now - f_info.st_atime - 60 * 60; // adjust by an hour
 }
 
-/*
-    Create a char array with the following content.
-    // 0: Nome Account
-    // 1: Edificio e Numero di stanza
-    // 2: Numero Cellulare
-    // 3: Numero Casa
-    // 4: Altro (potrebbe non esserci)
-*/
 void extract_gecos(char *gecos, int called) {
 
   char fields[5][80] = {"", "", "", "", ""};
@@ -418,51 +462,6 @@ void extract_gecos(char *gecos, int called) {
   }
 }
 
-void get_hour_minutes(char *buffer, time_t time_s) {
-  struct tm *timeinfo;
-  timeinfo = localtime(&time_s);
-  if (timeinfo->tm_hour > 0) {
-    char *format = "%I:%M";
-    strftime(buffer, 80, format, timeinfo);
-  } else {
-    if (timeinfo->tm_min > 1) {
-      char *format = "%M";
-      strftime(buffer, 80, format, timeinfo);
-    } else {
-      char *format = "";
-      strftime(buffer, 80, format, timeinfo);
-    }
-  }
-}
-
-void get_format_time(char *buffer, int time_s) {
-  struct tm *timeinfo;
-  time_t login_time = (time_t)time_s;
-  timeinfo = localtime(&login_time);
-
-  time_t now = time(0);
-  time_t six_months_s = 60 * 60 * 24 * 30 * 6;
-  time_t passed = now - login_time;
-
-  if (passed <= six_months_s) {
-    // Login time is displayed as month, day, hours and minutes
-    // If the time passed from last login is less than 6 months.
-    char *format;
-    if (sflag == 1) {
-      char *format = "%b  %d %H:%M";
-      strftime(buffer, 80, format, timeinfo);
-    } else {
-      char *format = "%a %b  %d %H:%M";
-      strftime(buffer, 80, format, timeinfo);
-    }
-  } else {
-    //  unless more than six months ago, in which case the year
-    //  is displayed rather than the hours and minutes.
-    char *format = "%Y";
-    strftime(buffer, 80, format, timeinfo);
-  }
-}
-
 void get_user_info(char *username, struct utmp record) {
   struct passwd *pwd = getpwnam(username);
 
@@ -555,109 +554,4 @@ void get_all_users() {
   }
 
   set_free(&usernames);
-}
-
-void print_header() {
-  if (lflag == 0 && headerflag == 0) {
-    headerflag = 1;
-    printf("Login%8sName%8sTty%8sIdle%6sLogin Time%8sOffice%8sOffice Phone\n",
-           "", "", "", "", "", "");
-  }
-}
-
-int main(int argc, char **argv) {
-  // NO OPT passed ?
-  // If nothing is passed in argv, default is -s.
-  // If a username is passed in argv, default is -l.
-  //    If username is not found -> sterr.
-
-  int opt;
-  // I can either have -opt, or -opt <optarg> for each of "slpm"
-  while ((opt = getopt(argc, argv, "lmpsh")) != EOF) {
-    switch (opt) {
-    case 'l':
-      lflag = 1; // lflag wins over sflag
-      break;
-    case 's':
-      sflag = 1;
-      break;
-    case 'p':
-      pflag = 1;
-      break;
-    case 'm':
-      mflag = 1;
-      break;
-
-    case 'h':
-    default:
-      printf("usage: %s [-lmps] [name or username]\n", argv[0]);
-      return 1;
-    }
-  }
-
-  StringSet usernames = {NULL, 0};
-
-  // Find usernames passed in command line
-  while (optind < argc) {
-    // Here we
-    if (argv[optind][0] != '-') {
-      // -l option is set by default if username is passed in parameters
-      allusersflag = 0;
-      if (sflag == 0) {
-        lflag = 1;
-      }
-      print_header();
-
-      struct utmp utmp_record;
-
-      bool found_user = 0;
-      int fd = open(_PATH_UTMP, O_RDONLY);
-      int record_size = sizeof(utmp_record);
-      while (read(fd, &utmp_record, record_size) == record_size) {
-        if (utmp_record.ut_type == USER_PROCESS) {
-          if (strcmp(utmp_record.ut_user, argv[optind]) == 0) {
-            found_user = 1;
-            if (sflag == 1) {
-              get_user_info(argv[optind], utmp_record);
-              printf("\n");
-            } else if (set_add(&usernames, utmp_record.ut_user)) {
-              get_user_info(argv[optind], utmp_record);
-              printf("\n");
-            }
-          } else {
-            // Check for user by Name only if mflag is not set
-            if (mflag == 0) {
-              char username_buff[80];
-              int found_name =
-                  real_name_matches_user(argv[optind], username_buff);
-
-              if (found_name) {
-                found_user = 1;
-                if (set_add(&usernames, username_buff)) {
-                  get_user_info(username_buff, utmp_record);
-                  printf("\n");
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (!found_user) {
-        fprintf(stderr, "%s: %s: no such user\n", PROGRAM_NAME, argv[optind]);
-      }
-    }
-
-    optind++;
-  }
-  set_free(&usernames);
-
-  if (allusersflag == 1) {
-    if (lflag == 0) {
-      sflag = 1;
-    }
-    // check finger for all users
-    print_header();
-    get_all_users();
-  }
 }
